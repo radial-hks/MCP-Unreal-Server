@@ -1,0 +1,19 @@
+[project]
+name = "mcp-server-unreal"
+version = "0.1.0"
+description = "mcp-server-unreal"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [ "mcp>=1.4.1","requests>=2.0"]
+[[project.authors]]
+name = "radial-hks"
+email = "radialjiajie@gmail.com"
+
+[build-system]
+requires = [ "hatchling",]
+build-backend = "hatchling.build"
+
+[project.scripts]
+mcp-server-unreal = "mcp_server_unreal:main"
+
+
