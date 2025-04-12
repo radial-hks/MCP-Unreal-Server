@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import json
 from typing import Dict, List, Optional, AsyncIterator, Any
 from contextlib import asynccontextmanager
 from collections import deque
@@ -106,6 +107,15 @@ class McpUnrealServer:
                         },
                         "required": ["code"],
                     },
+                    outputSchema={
+                        "type": "object",
+                        "properties": {
+                            "success": {"type": "boolean"},
+                            "result": {"type": "string"},
+                            "error": {"type": "string"}
+                        },
+                        "required": ["success"]
+                    }
                 ),
             ]
 
@@ -184,22 +194,35 @@ class McpUnrealServer:
                 await asyncio.sleep(1)
                 
             if not _unreal_connection or not _unreal_connection.remote_nodes:
-                return [types.TextContent(type="text", text="无法连接到Unreal实例，请确保Unreal正在运行并启用了远程执行")]
+                return [types.TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": "无法连接到Unreal实例，请确保Unreal正在运行并启用了远程执行"
+                }))]
         except Exception as e:
-            return [types.TextContent(type="text", text=f"连接Unreal失败: {str(e)}")]
+            return [types.TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": f"连接Unreal失败: {str(e)}"
+            }))]
 
         code = arguments.get("code")
         if not code:
-            return [types.TextContent(type="text", text="未提供Python代码")]
+            return [types.TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": "未提供Python代码"
+            }))]
 
         unattended = arguments.get("unattended", True)
         exec_mode = MODE_EXEC_STATEMENT
+        # exec_mode = MODE_EXEC_FILE
 
         try:
             # 获取第一个可用节点
             nodes = _unreal_connection.remote_nodes
             if not nodes:
-                return [types.TextContent(type="text", text="未发现任何Unreal节点")]
+                return [types.TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": "未发现任何Unreal节点"
+                }))]
             
             node_id = nodes[0]["node_id"]
             _unreal_connection.open_command_connection(node_id)
@@ -209,26 +232,28 @@ class McpUnrealServer:
             )
             _unreal_connection.close_command_connection()
 
+            # 处理Unreal返回的结果
             if not result.get("success", False):
-                return [types.TextContent(
-                    type="text",
-                    text=f"执行失败: {result.get('result', '未知错误')}"
-                )]
+                return [types.TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": result.get("result", "未知错误")
+                }))]
 
-            return [types.TextContent(
-                type="text",
-                text=f"执行结果:\n{result.get('result', '')}"
-            )]
+            # 成功执行，返回结果
+            return [types.TextContent(type="text", text=json.dumps({
+                "success": True,
+                "result": result.get("result", "")
+            }))]
         except Exception as e:
             if _unreal_connection:
                 try:
                     _unreal_connection.close_command_connection()
                 except:
                     pass
-            return [types.TextContent(
-                type="text",
-                text=f"执行失败: {str(e)}"
-            )]
+            return [types.TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": f"执行失败: {str(e)}"
+            }))]
 
     async def _monitor_nodes(self):
         """监控节点状态的异步任务。"""
