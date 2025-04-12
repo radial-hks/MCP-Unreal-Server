@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "mcp-server-unreal"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [ "mcp>=1.4.1","requests>=2.0"]
+dependencies = [
+ "mcp>=1.4.1",
+ "networkx>=3.4.2",
+ "pyvis>=0.3.2",
+ "requests>=2.0",
+]
 [[project.authors]]
 name = "radial-hks"
 email = "radialjiajie@gmail.com"

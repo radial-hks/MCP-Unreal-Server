@@ -35,8 +35,11 @@ def get_editor_properties_from_docstring(doc):
                 prop_name = match.group(1).strip()
                 prop_type = match.group(2).strip()
                 # 避免重复添加相同的属性名
-                if not any(p[0] == prop_name for p in props):
-                    props.append([prop_name, prop_type])
+                # 真的有相同的属性名哇...
+                # - ``fixed_bounds`` (bool):  [Read-Write] Whether or not fixed bounds are enabled.
+                # - ``fixed_bounds`` (Box):  [Read-Write] The fixed bounding box value for the whole system. When placed in the level and the bounding box is not visible to the camera, the effect is culled from rendering.
+                # if not any(p[0] == prop_name for p in props):
+                props.append([prop_name, prop_type])
     return props
 
 
