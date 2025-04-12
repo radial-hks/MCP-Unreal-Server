@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+src/mcp_server_unreal/verison.py
+mcp_unreal.log
+Test.py
