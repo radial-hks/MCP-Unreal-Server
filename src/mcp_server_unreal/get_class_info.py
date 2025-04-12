@@ -1,199 +1,219 @@
 import inspect
-import unreal
+import importlib
+import unreal # Keep the direct import for potential type hinting or fallback
 import json
 import re
+import sys
 
 def get_type_from_docstring(doc):
     """尝试从文档字符串中提取类型信息 (例如 '(Vector):')"""
     if not doc:
         return "Unknown"
+    # 匹配 '(Type):' 或 '[Read-Write]' 后面的类型
     match = re.search(r"\(([\w\.]+)\):", doc)
-    return match.group(1) if match else "Unknown"
+    if match:
+        return match.group(1)
+    match_rw = re.search(r"\[Read-Write\]\s*\(([\w\.]+)\)", doc)
+    if match_rw:
+        return match_rw.group(1)
+    return "Unknown"
 
 def get_editor_properties_from_docstring(doc):
     """尝试从类文档字符串中提取 Editor Properties"""
     props = []
     if not doc:
         return props
-    editor_props_section = re.search(r"\*\*Editor Properties:\*\*.*?\n(.*?)\n\n", doc, re.DOTALL)
+    # 使用更健壮的正则匹配 Editor Properties 部分
+    editor_props_section = re.search(r"\*\*Editor Properties:\*\*\s*\(see get_editor_property/set_editor_property\)\s*\n(.*?)(?=\n\n|\Z)", doc, re.DOTALL | re.IGNORECASE)
     if editor_props_section:
         prop_lines = editor_props_section.group(1).strip().split('\n')
         for line in prop_lines:
             line = line.strip()
-            if line.startswith('- ``'):
-                match = re.search(r"- ``(.*?)`` \((.*?)\):", line)
-                if match:
-                    props.append([match.group(1), match.group(2)])
+            # 匹配 '- ``prop_name`` (type):' 格式
+            match = re.search(r"-\s*``(.*?)``\s*\((.*?)\):", line)
+            if match:
+                prop_name = match.group(1).strip()
+                prop_type = match.group(2).strip()
+                # 避免重复添加相同的属性名
+                if not any(p[0] == prop_name for p in props):
+                    props.append([prop_name, prop_type])
     return props
 
 
 def inspect_class_to_json(cls):
+    """为单个类生成结构化的 JSON 信息"""
     info = {
-        "children": [],  # 需要分析整个代码库才能确定
+        "children": [],
         "class_methods": [],
-        "editor_properties": [], # 尝试从文档字符串提取
-        "generation": 0, # inspect 无法直接获取此信息
+        "editor_properties": [],
+        "generation": 0,
         "grand_parent": None,
         "methods": [],
         "name": cls.__name__,
         "parent": None,
         "parents": [],
         "properties": [],
-        "referenced_by": {}, # 需要分析整个代码库才能确定
-        "references": {}, # 需要更复杂的类型提示或文档字符串解析
+        "referenced_by": {},
+        "references": {},
         "static_methods": []
     }
 
-    # 获取继承层次
-    mro = inspect.getmro(cls)
-    info["parents"] = [base.__name__ for base in mro[1:]] # Exclude self
-    if len(mro) > 1:
-        info["parent"] = mro[1].__name__
-    if len(mro) > 2:
-         # 假设 _WrapperBase 是通用基类，查找它
-         wrapper_base_found = False
-         for base in reversed(mro):
-             if base.__name__ == '_WrapperBase':
-                 info["grand_parent"] = base.__name__
-                 wrapper_base_found = True
-                 break
-         # 如果找不到 _WrapperBase，则取继承链中的倒数第二个作为祖父类（如果存在）
-         if not wrapper_base_found and len(mro) > 2:
-             info["grand_parent"] = mro[-2].__name__ # Fallback
+    try:
+        mro = inspect.getmro(cls)
+        info["parents"] = [base.__name__ for base in mro[1:]]
+        if len(mro) > 1:
+            info["parent"] = mro[1].__name__
+        if len(mro) > 2:
+            # 查找 _WrapperBase 或 object 之前的最后一个作为祖父类
+            grand_parent_index = -1
+            for i in range(len(mro) - 1, 1, -1):
+                if mro[i].__name__ not in ('object', '_WrapperBase'):
+                    grand_parent_index = i
+                    break
+                elif mro[i].__name__ == '_WrapperBase' and i > 1: # Prefer _WrapperBase if not direct parent
+                    grand_parent_index = i
+                    break
 
-    # 尝试从类文档字符串提取 Editor Properties
-    class_doc = inspect.getdoc(cls)
-    info["editor_properties"] = get_editor_properties_from_docstring(class_doc)
-
-
-    # 获取属性和方法
-    references_count = {}
-    processed_members = set()
-
-    for i in inspect.classify_class_attrs(cls):
-         # 跳过继承来的成员，只处理当前类定义的
-        if i.defining_class != cls:
-             continue
-         # 跳过特殊方法和私有方法，除非是 __init__
-        if i.name.startswith('_') and i.name != '__init__':
-             continue
-        # 跳过已处理的成员 (例如 property 的 fget/fset/fdel)
-        if i.name in processed_members:
-            continue
-
-        member_type = "Unknown"
-        member_obj = None
-        try:
-            member_obj = getattr(cls, i.name)
-        except AttributeError:
-            continue # Skip if attribute cannot be accessed
-
-        if i.kind == "property":
-            info["properties"].append(i.name)
-            processed_members.add(i.name)
-            # 尝试获取属性类型
-            prop_doc = inspect.getdoc(member_obj)
-            member_type = get_type_from_docstring(prop_doc)
-
-        elif i.kind == "method":
-            info["methods"].append(i.name)
-            processed_members.add(i.name)
-            member_type = "method" # 方法本身类型
-            # 分析方法签名以查找引用的类型
-            try:
-                sig = inspect.signature(member_obj)
-                # 参数类型
-                for param in sig.parameters.values():
-                    if param.annotation != inspect.Parameter.empty and hasattr(param.annotation, '__name__'):
-                         ref_name = param.annotation.__name__
-                         references_count[ref_name] = references_count.get(ref_name, 0) + 1
-                # 返回类型
-                if sig.return_annotation != inspect.Signature.empty and hasattr(sig.return_annotation, '__name__'):
-                     ref_name = sig.return_annotation.__name__
-                     references_count[ref_name] = references_count.get(ref_name, 0) + 1
-            except (ValueError, TypeError): # 可能无法获取某些内置或C扩展方法的签名
-                pass
+            if grand_parent_index != -1 and grand_parent_index < len(mro) -1 :
+                # Ensure grand_parent is not the direct parent if possible
+                actual_grand_parent_index = grand_parent_index
+                if mro[grand_parent_index] == mro[1]: # If calculated grand_parent is the parent
+                    if grand_parent_index + 1 < len(mro) and mro[grand_parent_index+1].__name__ != 'object':
+                        actual_grand_parent_index = grand_parent_index + 1
+                    elif grand_parent_index > 1: # Fallback to parent's parent if exists
+                        actual_grand_parent_index = 2
 
 
-        elif i.kind == "class method":
-            info["class_methods"].append(i.name)
-            processed_members.add(i.name)
-            member_type = "class method"
-        elif i.kind == "static method":
-            info["static_methods"].append(i.name)
-            processed_members.add(i.name)
-            member_type = "static method"
-
-        # 更新引用计数 (基于属性类型)
-        if member_type != "Unknown" and member_type not in ["method", "class method", "static method"]:
-             references_count[member_type] = references_count.get(member_type, 0) + 1
+                if actual_grand_parent_index < len(mro):
+                    info["grand_parent"] = mro[actual_grand_parent_index].__name__
 
 
-    # 添加父类的引用
-    if info["parent"]:
-        references_count[info["parent"]] = references_count.get(info["parent"], 0) + 1
+        class_doc = inspect.getdoc(cls)
+        # 获取类的注释部分
+        # print(class_doc)
+        info["editor_properties"] = get_editor_properties_from_docstring(class_doc)
 
-    info["references"] = references_count
+        references_count = {}
+        processed_members = set()
 
-    # 清理空列表
-    info = {k: v for k, v in info.items() if v or k in ["name", "generation", "children", "referenced_by"]} # 保留特定空字段
+        # 使用 classify_class_attrs 获取并分类当前类定义的成员
+        for attr in inspect.classify_class_attrs(cls):
+            # print(attr.defining_class)
+            
+            # 只处理当前类定义的成员
+            if attr.defining_class != cls:
+                continue
 
+            # 跳过特殊方法和私有方法，除非是 __init__
+            if attr.name.startswith('_') and attr.name != '__init__':
+                continue
+            # print(f"  {attr.name}:{attr.kind}:{attr.defining_class}")
+            member_obj = attr.object # 获取成员对象
+
+            if attr.kind == "property":
+                info["properties"].append(attr.name)
+                prop_doc = inspect.getdoc(member_obj)
+                # 假设 get_type_from_docstring 函数存在且可用
+                member_type_str = get_type_from_docstring(prop_doc)
+                if member_type_str != "Unknown":
+                    references_count[member_type_str] = references_count.get(member_type_str, 0) + 1
+            elif attr.kind == "class method":
+                info["class_methods"].append(attr.name)
+                # 注意：原始代码未对类方法或静态方法进行签名分析以查找引用
+                # 如果需要，可以在此处添加类似方法的签名分析逻辑
+
+            elif attr.kind == "static method":
+                info["static_methods"].append(attr.name)
+            elif attr.kind == "method":
+                info["methods"].append(attr.name)
+                # 分析签名以查找引用 (与原始代码逻辑保持一致)
+                try:
+                    # 对于方法，attr.object 通常是函数本身
+                    sig = inspect.signature(member_obj)
+                    for param in sig.parameters.values():
+                        if param.annotation != inspect.Parameter.empty and hasattr(param.annotation, '__name__'):
+                            ref_name = param.annotation.__name__
+                            references_count[ref_name] = references_count.get(ref_name, 0) + 1
+                    if sig.return_annotation != inspect.Signature.empty and hasattr(sig.return_annotation, '__name__'):
+                        ref_name = sig.return_annotation.__name__
+                        references_count[ref_name] = references_count.get(ref_name, 0) + 1
+                except (ValueError, TypeError):
+                    # 如果无法获取签名（例如，某些内置方法），则忽略
+                    pass
+            # 可以选择性地处理 'data' 类型的属性
+            # elif attr.kind == "data":
+            #     if "attributes" not in info: info["attributes"] = []
+            #     info["attributes"].append(attr.name)
+            #     # 可以在这里添加对数据属性类型注解的分析逻辑
+            #     annotations = getattr(cls, '__annotations__', {})
+            #     if attr.name in annotations:
+            #         annotation = annotations[attr.name]
+            #         if hasattr(annotation, '__name__'):
+            #              ref_name = annotation.__name__
+            #              references_count[ref_name] = references_count.get(ref_name, 0) + 1
+
+        # 注意: 使用 classify_class_attrs 和 defining_class 检查后，
+        # 'processed_members' 集合通常不再需要，因为它能正确处理继承和覆盖。
+
+        # Add parent reference
+        if info["parent"]:
+            references_count[info["parent"]] = references_count.get(info["parent"], 0) + 1
+
+        info["references"] = references_count
+        info = {k: v for k, v in info.items() if v or k in ["name", "generation", "children", "referenced_by"]}
+
+    except Exception as e:
+        print(f"Error inspecting class {cls.__name__}: {e}")
+        # Return basic info on error
+        return json.dumps({"name": cls.__name__, "error": str(e)}, indent=2)
+    # print(info)
     return json.dumps(info, indent=2)
 
 
-# 调用函数并打印 JSON
-json_output = inspect_class_to_json(unreal.Box)
-print(json_output)
+def get_module_classes(module_name):
+    """动态导入模块并获取其中定义的类"""
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        print(f"错误：无法导入模块 '{module_name}'。")
+        return []
+    # print("断点测试---1")
+    # print(module)
+    classes = []
+    for name, obj in inspect.getmembers(module, inspect.isclass):
+        # print(name)
+        # 确保类是在当前模块中定义的 (或其子模块，对 unreal 可能需要)
+        # if hasattr(obj, '__module__') and obj.__module__ is not None and obj.__module__.startswith(module_name):
+            # 进一步检查，避免导入第三方库的类，如果需要的话
+            # if 'unreal' in str(obj.__module__): # Example filter
+        classes.append((name, obj))
+        # print("断点测试---2")
+    return classes
 
-# 预期从 unreal.Box 提取的 JSON (基于您提供的目标和 inspect 能力)
-# 注意: referenced_by 和 children 无法仅通过 inspect 单个类来确定
-# 注意: editor_properties 和 references 的提取依赖于文档字符串格式
-"""
-预期输出示例 (可能因 unreal.py stub 的实际内容和格式略有不同):
-{
-  "children": [],
-  "class_methods": [],
-  "editor_properties": [
-    [
-      "is_valid",
-      "bool"
-    ],
-    [
-      "max",
-      "Vector"
-    ],
-    [
-      "min",
-      "Vector"
-    ]
-  ],
-  "generation": 0,
-  "grand_parent": "_WrapperBase",
-  "methods": [
-    "__init__",
-    "random_point_in_box_extents",
-    "test_point_inside_box",
-    "test_box_sphere_intersection"
-  ],
-  "name": "Box",
-  "parent": "StructBase",
-  "parents": [
-    "StructBase",
-    "_WrapperBase",
-    "object"
-  ],
-  "properties": [
-    "is_valid",
-    "max",
-    "min"
-  ],
-  "referenced_by": {},
-  "references": {
-    "StructBase": 1,
-    "Vector": 7, # __init__ min, max, random_point_in_box_extents ret, test_point_inside_box point, test_box_sphere_intersection center, prop max, prop min
-    "bool": 3,   # __init__ consider_on_box_as_inside, test_point_inside_box ret, prop is_valid
-    "float": 1   # test_box_sphere_intersection radius (assuming double maps to float)
-  },
-  "static_methods": []
-}
-"""
+if __name__ == "__main__":
+    module_to_inspect = "unreal"
+    # print(f"Inspecting module: {module_to_inspect}")
+    class_list = get_module_classes(module_to_inspect)[1:]
+    all_class_info = {}
+
+    # class_json_str = inspect_class_to_json(unreal.Box)
+    # print(class_json_str)
+    
+    if class_list:
+        # print(f"Found {len(class_list)} classes in module '{module_to_inspect}'. Generating JSON...")
+        # 使用字典来存储所有类的 JSON 信息，以类名为键
+        for name, cls_obj in class_list:
+            # print("断点测试---3")
+            # print(f"Processing: {name}")
+            # if name == "Box":
+            class_json_str = inspect_class_to_json(cls_obj)
+            try:
+                # 解析单个类的 JSON 以便合并
+                all_class_info[name] = json.loads(class_json_str)
+            except json.JSONDecodeError:
+                print(f"Warning: Could not decode JSON for class {name}")
+                all_class_info[name] = {"name": name, "error": "JSON Decode Error"}
+        # 打印包含所有类信息的单个 JSON 对象
+        print(json.dumps(all_class_info, indent=2))
+    else:
+        print(f"No classes found in module '{module_to_inspect}'.")
